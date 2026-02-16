@@ -3,6 +3,21 @@ import 'package:flutter_warden/flutter_warden.dart';
 import 'package:http/http.dart' as http;
 
 void main() {
+  test('attachScreenshotOnError defaults to false and is configurable', () {
+    const defaults = WardenOptions(botToken: 'a', chatId: 'b');
+    expect(defaults.attachScreenshotOnError, isFalse);
+    expect(defaults.sendInDebug, isFalse);
+
+    final builder = WardenOptionsBuilder()
+      ..botToken = 'a'
+      ..chatId = 'b'
+      ..sendInDebug = true
+      ..attachScreenshotOnError = true;
+    final built = builder.build();
+    expect(built.attachScreenshotOnError, isTrue);
+    expect(built.sendInDebug, isTrue);
+  });
+
   test('isInitialized is false before init', () {
     expect(FlutterWarden.isInitialized, isFalse);
   });

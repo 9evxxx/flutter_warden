@@ -28,6 +28,7 @@ void main() {
         const WardenOptions(
           botToken: 'token',
           chatId: 'chat',
+          sendInDebug: true,
           includeDeviceContext: false,
           includeIp: false,
         ),
@@ -56,6 +57,7 @@ void main() {
       const WardenOptions(
         botToken: 'token',
         chatId: 'chat',
+        sendInDebug: true,
         includeDeviceContext: false,
         includeIp: false,
       ),
@@ -67,5 +69,28 @@ void main() {
     expect(requests.length, 1);
     expect(requests[0].containsKey('parse_mode'), isFalse);
     expect(requests[0]['text'], 'Oops\nbroken');
+  });
+
+  test('does not send in debug when sendInDebug is false', () async {
+    var called = false;
+
+    final mock = MockClient((request) async {
+      called = true;
+      return http.Response('{"ok":true,"result":{}}', 200);
+    });
+
+    final client = TelegramClient(
+      const WardenOptions(
+        botToken: 'token',
+        chatId: 'chat',
+        sendInDebug: false,
+        includeDeviceContext: false,
+        includeIp: false,
+      ),
+      httpClient: mock,
+    );
+
+    await client.send('test');
+    expect(called, isFalse);
   });
 }

@@ -2,6 +2,8 @@ import 'dart:async' show runZoned, ZoneSpecification, unawaited;
 import 'dart:ui' as ui;
 
 import 'package:flutter/foundation.dart';
+import 'package:flutter/rendering.dart';
+import 'package:flutter/widgets.dart';
 import 'package:http/http.dart' as http;
 
 import '../transport/telegram_client.dart';
@@ -38,9 +40,15 @@ class FlutterWarden {
 
   static WardenOptions? _options;
   static TelegramClient? _client;
+  static final GlobalKey _screenshotBoundaryKey = GlobalKey(
+    debugLabel: 'flutter_warden_screenshot_boundary',
+  );
 
   /// Whether [init] has been called successfully.
   static bool get isInitialized => _options != null && _client != null;
+
+  /// Key used by [WardenScreenshotBoundary] to capture screenshots.
+  static GlobalKey get screenshotBoundaryKey => _screenshotBoundaryKey;
 
   /// Initializes FlutterWarden with [optionsBuilder] and runs the app via [appRunner].
   ///
@@ -94,31 +102,22 @@ class FlutterWarden {
   static void _installErrorHandlers() {
     final previousFlutterError = FlutterError.onError;
     FlutterError.onError = (FlutterErrorDetails details) {
-      final client = _client;
-      if (client != null) {
-        unawaited(
-          client
-              .formatException(
-                details.exception,
-                details.stack ?? StackTrace.current,
-              )
-              .then(client.send),
-        );
-      }
+      unawaited(
+        _sendExceptionWithOptionalScreenshot(
+          details.exception,
+          details.stack ?? StackTrace.current,
+        ),
+      );
       previousFlutterError?.call(details);
     };
 
     final previousOnError = ui.PlatformDispatcher.instance.onError;
-    ui.PlatformDispatcher.instance.onError = (Object error, StackTrace stackTrace) {
-      final client = _client;
-      if (client != null) {
-        unawaited(
-          client.formatException(error, stackTrace).then(client.send),
-        );
-      }
-      final handled = previousOnError?.call(error, stackTrace) ?? false;
-      return handled;
-    };
+    ui.PlatformDispatcher.instance.onError =
+        (Object error, StackTrace stackTrace) {
+          unawaited(_sendExceptionWithOptionalScreenshot(error, stackTrace));
+          final handled = previousOnError?.call(error, stackTrace) ?? false;
+          return handled;
+        };
   }
 
   /// Captures an [exception] and optional [stackTrace], formats it, and sends to Telegram.
@@ -126,9 +125,7 @@ class FlutterWarden {
     Object exception, {
     StackTrace? stackTrace,
   }) async {
-    if (_client == null) return;
-    final text = await _client!.formatException(exception, stackTrace);
-    await _client!.send(text);
+    await _sendExceptionWithOptionalScreenshot(exception, stackTrace);
   }
 
   /// Captures a [message] and sends it to Telegram.
@@ -194,6 +191,72 @@ class FlutterWarden {
           captureException(error, stackTrace: stackTrace);
         },
       ),
+    );
+  }
+
+  static Future<void> _sendExceptionWithOptionalScreenshot(
+    Object exception,
+    StackTrace? stackTrace,
+  ) async {
+    final client = _client;
+    final options = _options;
+    if (client == null || options == null) return;
+
+    final text = await client.formatException(exception, stackTrace);
+    if (!options.attachScreenshotOnError) {
+      await client.send(text);
+      return;
+    }
+
+    final screenshot = await _captureScreenshot();
+    if (screenshot != null && screenshot.isNotEmpty) {
+      await client.sendPhoto(screenshot, caption: text);
+      await client.send(text);
+      return;
+    }
+
+    await client.send(text);
+  }
+
+  static Future<Uint8List?> _captureScreenshot() async {
+    try {
+      final context = _screenshotBoundaryKey.currentContext;
+      if (context == null) return null;
+      final renderObject = context.findRenderObject();
+      if (renderObject is! RenderRepaintBoundary) return null;
+      final view = View.maybeOf(context);
+      if (view == null) return null;
+
+      if (renderObject.debugNeedsPaint) {
+        await Future<void>.delayed(const Duration(milliseconds: 16));
+      }
+
+      final image = await renderObject.toImage(
+        pixelRatio: view.devicePixelRatio,
+      );
+      try {
+        final byteData = await image.toByteData(format: ui.ImageByteFormat.png);
+        return byteData?.buffer.asUint8List();
+      } finally {
+        image.dispose();
+      }
+    } catch (_) {
+      return null;
+    }
+  }
+}
+
+/// Wrap your app with this widget to enable screenshot attachments on errors.
+class WardenScreenshotBoundary extends StatelessWidget {
+  const WardenScreenshotBoundary({super.key, required this.child});
+
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    return RepaintBoundary(
+      key: FlutterWarden.screenshotBoundaryKey,
+      child: child,
     );
   }
 }

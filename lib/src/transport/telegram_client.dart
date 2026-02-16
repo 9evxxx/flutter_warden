@@ -17,13 +17,14 @@ class TelegramClient {
 
   static const String _baseUrl = 'https://api.telegram.org/bot';
   static const int _maxMessageLength = 4096;
+  static const int _maxCaptionLength = 1024;
   static const String _truncatedSuffix = '…\n[truncated]';
 
   /// Sends [text] to the configured Telegram chat.
   /// Telegram message length limit is 4096.
   /// For long messages we fallback to plain text to avoid cutting HTML tags.
   Future<void> send(String text) async {
-    if (!_options.enabled) return;
+    if (!_canSend) return;
 
     final canUseHtml =
         text.length <= _maxMessageLength && _isSafeTelegramHtml(text);
@@ -39,9 +40,7 @@ class TelegramClient {
         useHtml: canUseHtml,
       );
 
-      if (response.statusCode == 400 &&
-          canUseHtml &&
-          response.body.toLowerCase().contains('parse entities')) {
+      if (response.statusCode == 400 && canUseHtml) {
         final fallbackPayload = _truncate(_stripHtml(text), _maxMessageLength);
         final fallbackResponse = await _postMessage(
           uri: uri,
@@ -64,6 +63,35 @@ class TelegramClient {
     } catch (e, st) {
       if (kDebugMode) {
         debugPrint('FlutterWarden: Failed to send to Telegram: $e\n$st');
+      }
+    }
+  }
+
+  /// Sends [screenshot] as a Telegram photo with a short caption.
+  ///
+  /// Caption is plain text (HTML stripped) to avoid Telegram parse errors.
+  Future<void> sendPhoto(Uint8List screenshot, {String? caption}) async {
+    if (!_canSend) return;
+
+    final uri = Uri.parse('$_baseUrl${_options.botToken}/sendPhoto');
+    final safeCaption = caption == null
+        ? null
+        : _truncate(_stripHtml(caption), _maxCaptionLength);
+
+    try {
+      final response = await _postPhoto(
+        uri: uri,
+        screenshot: screenshot,
+        caption: safeCaption,
+      );
+      if (response.statusCode != 200 && kDebugMode) {
+        debugPrint(
+          'FlutterWarden: Telegram photo send failed ${response.statusCode} ${response.body}',
+        );
+      }
+    } catch (e, st) {
+      if (kDebugMode) {
+        debugPrint('FlutterWarden: Failed to send photo to Telegram: $e\n$st');
       }
     }
   }
@@ -99,6 +127,38 @@ class TelegramClient {
           body: jsonEncode(body),
         )
         .timeout(const Duration(seconds: 10));
+  }
+
+  Future<http.Response> _postPhoto({
+    required Uri uri,
+    required Uint8List screenshot,
+    required String? caption,
+  }) async {
+    final request = http.MultipartRequest('POST', uri)
+      ..fields['chat_id'] = _options.chatId
+      ..fields['disable_notification'] = 'true'
+      ..files.add(
+        http.MultipartFile.fromBytes(
+          'photo',
+          screenshot,
+          filename: 'flutter_warden_error.png',
+        ),
+      );
+    if (caption != null && caption.isNotEmpty) {
+      request.fields['caption'] = caption;
+    }
+
+    final client = _httpClient ?? http.Client();
+    try {
+      final streamedResponse = await client
+          .send(request)
+          .timeout(const Duration(seconds: 15));
+      return http.Response.fromStream(streamedResponse);
+    } finally {
+      if (_httpClient == null) {
+        client.close();
+      }
+    }
   }
 
   Future<Map<String, String?>?> _deviceContext() async {
@@ -193,4 +253,7 @@ class TelegramClient {
     final closing = RegExp('</$tag>', caseSensitive: false);
     return opening.allMatches(s).length == closing.allMatches(s).length;
   }
+
+  bool get _canSend =>
+      _options.enabled && (!kDebugMode || _options.sendInDebug);
 }
