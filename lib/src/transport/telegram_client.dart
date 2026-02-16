@@ -14,29 +14,35 @@ class TelegramClient {
   final WardenOptions _options;
 
   static const String _baseUrl = 'https://api.telegram.org/bot';
+  static const int _maxMessageLength = 4096;
+  static const String _truncatedSuffix = '…\n[truncated]';
 
   /// Sends [text] to the configured Telegram chat.
-  /// Telegram message length limit is 4096; longer text is truncated.
+  /// Telegram message length limit is 4096.
+  /// For long messages we fallback to plain text to avoid cutting HTML tags.
   Future<void> send(String text) async {
     if (!_options.enabled) return;
 
-    const maxLength = 4096;
-    final payload = text.length > maxLength
-        ? '${text.substring(0, maxLength - 20)}…\n[truncated]'
+    final payload = text.length > _maxMessageLength
+        ? _truncate(_stripHtml(text), _maxMessageLength)
         : text;
+    final useHtml = text.length <= _maxMessageLength;
 
     final uri = Uri.parse('$_baseUrl${_options.botToken}/sendMessage');
     try {
-      final response = await http.post(
-        uri,
-        headers: {'Content-Type': 'application/json'},
-        body: jsonEncode({
-          'chat_id': _options.chatId,
-          'text': payload,
-          'parse_mode': 'HTML',
-          'disable_web_page_preview': true,
-        }),
-      ).timeout(const Duration(seconds: 10));
+      final response = await _postMessage(
+        uri: uri,
+        text: payload,
+        useHtml: useHtml,
+      );
+
+      if (response.statusCode == 400 &&
+          useHtml &&
+          response.body.contains("can't parse entities")) {
+        final fallbackPayload = _truncate(_stripHtml(text), _maxMessageLength);
+        await _postMessage(uri: uri, text: fallbackPayload, useHtml: false);
+        return;
+      }
 
       if (response.statusCode != 200 && kDebugMode) {
         debugPrint(
@@ -50,6 +56,29 @@ class TelegramClient {
     }
   }
 
+  Future<http.Response> _postMessage({
+    required Uri uri,
+    required String text,
+    required bool useHtml,
+  }) {
+    final body = <String, Object>{
+      'chat_id': _options.chatId,
+      'text': text,
+      'disable_web_page_preview': true,
+    };
+    if (useHtml) {
+      body['parse_mode'] = 'HTML';
+    }
+
+    return http
+        .post(
+          uri,
+          headers: {'Content-Type': 'application/json'},
+          body: jsonEncode(body),
+        )
+        .timeout(const Duration(seconds: 10));
+  }
+
   Future<Map<String, String?>?> _deviceContext() async {
     if (!_options.includeDeviceContext) return null;
     final ctx = await ReportContext.collect(includeIp: _options.includeIp);
@@ -58,7 +87,10 @@ class TelegramClient {
   }
 
   /// Builds a readable error report from exception and optional stack trace.
-  Future<String> formatException(Object exception, [StackTrace? stackTrace]) async {
+  Future<String> formatException(
+    Object exception, [
+    StackTrace? stackTrace,
+  ]) async {
     final type = exception.runtimeType.toString();
     final message = exception.toString();
     final deviceContext = await _deviceContext();
@@ -116,5 +148,14 @@ class TelegramClient {
         .replaceAll('&', '&amp;')
         .replaceAll('<', '&lt;')
         .replaceAll('>', '&gt;');
+  }
+
+  static String _stripHtml(String s) => s.replaceAll(RegExp(r'<[^>]*>'), '');
+
+  static String _truncate(String s, int maxLength) {
+    if (s.length <= maxLength) return s;
+    final keep = maxLength - _truncatedSuffix.length;
+    if (keep <= 0) return s.substring(0, maxLength);
+    return '${s.substring(0, keep)}$_truncatedSuffix';
   }
 }
