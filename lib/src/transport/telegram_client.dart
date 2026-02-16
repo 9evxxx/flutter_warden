@@ -9,9 +9,11 @@ import '../formatters/telegram_templates.dart';
 
 /// Sends formatted error/message payloads to Telegram via Bot API.
 class TelegramClient {
-  TelegramClient(this._options);
+  TelegramClient(this._options, {http.Client? httpClient})
+    : _httpClient = httpClient;
 
   final WardenOptions _options;
+  final http.Client? _httpClient;
 
   static const String _baseUrl = 'https://api.telegram.org/bot';
   static const int _maxMessageLength = 4096;
@@ -23,24 +25,34 @@ class TelegramClient {
   Future<void> send(String text) async {
     if (!_options.enabled) return;
 
-    final payload = text.length > _maxMessageLength
-        ? _truncate(_stripHtml(text), _maxMessageLength)
-        : text;
-    final useHtml = text.length <= _maxMessageLength;
+    final canUseHtml =
+        text.length <= _maxMessageLength && _isSafeTelegramHtml(text);
+    final payload = canUseHtml
+        ? text
+        : _truncate(_stripHtml(text), _maxMessageLength);
 
     final uri = Uri.parse('$_baseUrl${_options.botToken}/sendMessage');
     try {
       final response = await _postMessage(
         uri: uri,
         text: payload,
-        useHtml: useHtml,
+        useHtml: canUseHtml,
       );
 
       if (response.statusCode == 400 &&
-          useHtml &&
-          response.body.contains("can't parse entities")) {
+          canUseHtml &&
+          response.body.toLowerCase().contains('parse entities')) {
         final fallbackPayload = _truncate(_stripHtml(text), _maxMessageLength);
-        await _postMessage(uri: uri, text: fallbackPayload, useHtml: false);
+        final fallbackResponse = await _postMessage(
+          uri: uri,
+          text: fallbackPayload,
+          useHtml: false,
+        );
+        if (fallbackResponse.statusCode != 200 && kDebugMode) {
+          debugPrint(
+            'FlutterWarden: Telegram send failed ${fallbackResponse.statusCode} ${fallbackResponse.body}',
+          );
+        }
         return;
       }
 
@@ -70,6 +82,16 @@ class TelegramClient {
       body['parse_mode'] = 'HTML';
     }
 
+    final client = _httpClient;
+    if (client != null) {
+      return client
+          .post(
+            uri,
+            headers: {'Content-Type': 'application/json'},
+            body: jsonEncode(body),
+          )
+          .timeout(const Duration(seconds: 10));
+    }
     return http
         .post(
           uri,
@@ -157,5 +179,18 @@ class TelegramClient {
     final keep = maxLength - _truncatedSuffix.length;
     if (keep <= 0) return s.substring(0, maxLength);
     return '${s.substring(0, keep)}$_truncatedSuffix';
+  }
+
+  static bool _isSafeTelegramHtml(String s) {
+    for (final tag in ['pre', 'code', 'b']) {
+      if (!_hasBalancedTag(s, tag)) return false;
+    }
+    return true;
+  }
+
+  static bool _hasBalancedTag(String s, String tag) {
+    final opening = RegExp('<$tag(?:\\s+[^>]*)?>', caseSensitive: false);
+    final closing = RegExp('</$tag>', caseSensitive: false);
+    return opening.allMatches(s).length == closing.allMatches(s).length;
   }
 }
